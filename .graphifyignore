@@ -1,0 +1,10 @@
+# Directorios excluidos del árbol AST de Graphify
+old/
+__pycache__/
+.pytest_cache/
+.idea/
+.venv/
+venv/
+data/
+graphify-out/
+.graphify/

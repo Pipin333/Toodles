@@ -6,122 +6,76 @@ from sznLogger import get_logger
 
 logger = get_logger("db")
 from database import (
-    get_top_songs,
-    get_recent_history,
-    add_or_update_song,
-    preload_top_songs_cache,
-    get_db_session,
-    Song,
-    UserLike,
-    UserDislike,
     AppConfig,
     PlayLog,
+    Song,
+    UserDislike,
+    UserLike,
+    add_or_update_song,
+    find_similar_song as db_find_similar_song,
+    get_db_session,
+    get_liked_songs_by_user as db_get_liked_songs_by_user,
+    get_liked_songs_by_users as db_get_liked_songs_by_users,
+    get_recent_history,
+    get_top_songs,
+    like_song as db_like_song,
     log_dislike_event,
-    remove_dislike
+    preload_top_songs_cache,
+    remove_dislike,
+    unlike_song as db_unlike_song,
 )
 
+
 class MusicDB(commands.Cog):
+    """Cog de Discord para gestión de favoritos, ranking y telemetría de servidor."""
+
     def __init__(self, bot):
         self.bot = bot
         preload_top_songs_cache()
-        self.last_played = []  # historial reciente en memoria (fallback)
+        self.last_played = []
 
-    def log_song(self, title):
+    def log_song(self, title: str) -> None:
+        """Registra la canción en el historial reciente en memoria y garantiza su existencia en BD sin duplicar played_count."""
         self.last_played.insert(0, title)
         if len(self.last_played) > 20:
             self.last_played.pop()
 
         try:
-            with get_db_session() as session:
-                song = session.query(Song).filter_by(title=title).first()
-                if song:
-                    song.played_count = (song.played_count or 0) + 1
-                else:
-                    new_song = Song(title=title, played_count=1)
-                    session.add(new_song)
-        except Exception as e:
-            logger.warning(f"⚠️ Error al registrar reproducción de canción: {e}")
+            add_or_update_song(title=title)
+        except Exception as err:
+            logger.warning(f"⚠️ Error al asegurar registro de canción en BD: {err}")
 
-    def find_similar_song(self, query, threshold=90):
-        try:
-            with get_db_session() as session:
-                songs = session.query(Song).all()
-                choices = {song.title: song for song in songs if song.title}
-                if not choices:
-                    return None
-                match = process.extractOne(query, choices.keys())
-                if match and match[1] >= threshold:
-                    return choices[match[0]]
-        except Exception as e:
-            logger.warning(f"⚠️ Error en búsqueda difusa de canciones: {e}")
-        return None
+    def find_similar_song(self, query: str, threshold: int = 90):
+        """Busca una canción similar delegando en la capa de datos centralizada."""
+        return db_find_similar_song(query, threshold=threshold)
 
-    def get_liked_songs_by_user(self, user_id):
-        try:
-            with get_db_session() as session:
-                likes = session.query(UserLike).filter_by(user_id=str(user_id)).all()
-                if not likes:
-                    return []
-                song_ids = [like.song_id for like in likes]
-                return session.query(Song).filter(Song.id.in_(song_ids)).all()
-        except Exception as e:
-            logger.warning(f"⚠️ Error al obtener canciones favoritas: {e}")
-            return []
+    def get_liked_songs_by_user(self, user_id: str):
+        """Obtiene las canciones favoritas de un usuario desde database.py."""
+        return db_get_liked_songs_by_user(user_id)
 
-    def get_liked_songs_by_users(self, user_ids):
-        try:
-            str_user_ids = [str(uid) for uid in user_ids]
-            with get_db_session() as session:
-                likes = session.query(UserLike).filter(UserLike.user_id.in_(str_user_ids)).all()
-                if not likes:
-                    return []
-                song_ids = {like.song_id for like in likes}
-                return session.query(Song).filter(Song.id.in_(song_ids)).all()
-        except Exception as e:
-            logger.warning(f"⚠️ Error al obtener canciones favoritas del grupo: {e}")
-            return []
+    def get_liked_songs_by_users(self, user_ids: list[str]):
+        """Obtiene las canciones favoritas de múltiples usuarios desde database.py."""
+        return db_get_liked_songs_by_users(user_ids)
 
-    def like_song(self, user_id, song_title):
-        try:
-            with get_db_session() as session:
-                song = session.query(Song).filter_by(title=song_title).first()
-                if not song:
-                    return False
-                existing = session.query(UserLike).filter_by(user_id=str(user_id), song_id=song.id).first()
-                if not existing:
-                    like = UserLike(user_id=str(user_id), song_id=song.id)
-                    session.add(like)
-                    return True
-                return False
-        except Exception as e:
-            logger.warning(f"⚠️ Error al dar me gusta: {e}")
-            return False
+    def like_song(self, user_id: str, song_title: str) -> bool:
+        """Registra un me gusta delegando en database.py."""
+        return db_like_song(user_id, song_title)
 
-    def unlike_song(self, user_id, song_title):
-        try:
-            with get_db_session() as session:
-                song = session.query(Song).filter_by(title=song_title).first()
-                if not song:
-                    return False
-                existing = session.query(UserLike).filter_by(user_id=str(user_id), song_id=song.id).first()
-                if existing:
-                    session.delete(existing)
-                    return True
-                return False
-        except Exception as e:
-            logger.warning(f"⚠️ Error al eliminar me gusta: {e}")
-            return False
+    def unlike_song(self, user_id: str, song_title: str) -> bool:
+        """Elimina un me gusta delegando en database.py."""
+        return db_unlike_song(user_id, song_title)
 
     @commands.command()
     async def like(self, ctx):
         """Le da me gusta a la canción que se está reproduciendo actualmente."""
         core = self.bot.get_cog("MusicCore")
-        if not core or not core.current_song:
+        player = core.get_player(ctx) if core else None
+        if not player or not player.current_song:
             await ctx.send("⚠️ No hay ninguna canción en reproducción.")
             return
-        added = await asyncio.to_thread(self.like_song, str(ctx.author.id), core.current_song['title'])
+        added = await asyncio.to_thread(self.like_song, str(ctx.author.id), player.current_song['title'])
         if added:
-            await ctx.send(f"❤️ Canción guardada en tus favoritas: **{core.current_song['title']}**")
+            await ctx.send(f"❤️ Canción guardada en tus favoritas: **{player.current_song['title']}**")
         else:
             await ctx.send("✅ Esta canción ya está en tus favoritas.")
 
@@ -129,12 +83,13 @@ class MusicDB(commands.Cog):
     async def unlike(self, ctx):
         """Elimina la canción actual de tus favoritas."""
         core = self.bot.get_cog("MusicCore")
-        if not core or not core.current_song:
+        player = core.get_player(ctx) if core else None
+        if not player or not player.current_song:
             await ctx.send("⚠️ No hay ninguna canción en reproducción.")
             return
-        removed = await asyncio.to_thread(self.unlike_song, str(ctx.author.id), core.current_song['title'])
+        removed = await asyncio.to_thread(self.unlike_song, str(ctx.author.id), player.current_song['title'])
         if removed:
-            await ctx.send(f"❌ Canción eliminada de tus favoritas: **{core.current_song['title']}**")
+            await ctx.send(f"❌ Canción eliminada de tus favoritas: **{player.current_song['title']}**")
         else:
             await ctx.send("ℹ️ Esta canción no estaba en tus favoritas.")
 
@@ -142,12 +97,13 @@ class MusicDB(commands.Cog):
     async def dislike(self, ctx):
         """Marca la canción actual como no gustada (feedback negativo para recomendaciones)."""
         core = self.bot.get_cog("MusicCore")
-        if not core or not core.current_song:
+        player = core.get_player(ctx) if core else None
+        if not player or not player.current_song:
             await ctx.send("⚠️ No hay ninguna canción en reproducción.")
             return
-        added = await asyncio.to_thread(log_dislike_event, str(ctx.author.id), core.current_song['title'])
+        added = await asyncio.to_thread(log_dislike_event, str(ctx.author.id), player.current_song['title'])
         if added:
-            await ctx.send(f"👎 Canción marcada como no gustada: **{core.current_song['title']}**")
+            await ctx.send(f"👎 Canción marcada como no gustada: **{player.current_song['title']}**")
         else:
             await ctx.send("ℹ️ Ya habías marcado esta canción como no gustada.")
 
@@ -155,12 +111,13 @@ class MusicDB(commands.Cog):
     async def undislike(self, ctx):
         """Elimina la marca de no me gusta de la canción actual."""
         core = self.bot.get_cog("MusicCore")
-        if not core or not core.current_song:
+        player = core.get_player(ctx) if core else None
+        if not player or not player.current_song:
             await ctx.send("⚠️ No hay ninguna canción en reproducción.")
             return
-        removed = await asyncio.to_thread(remove_dislike, str(ctx.author.id), core.current_song['title'])
+        removed = await asyncio.to_thread(remove_dislike, str(ctx.author.id), player.current_song['title'])
         if removed:
-            await ctx.send(f"✅ Se eliminó la marca de no gustada: **{core.current_song['title']}**")
+            await ctx.send(f"✅ Se eliminó la marca de no gustada: **{player.current_song['title']}**")
         else:
             await ctx.send("ℹ️ Esta canción no estaba marcada como no gustada.")
 
@@ -171,8 +128,13 @@ class MusicDB(commands.Cog):
         if not songs:
             await ctx.send("📭 No tienes canciones favoritas aún. Usa `td?like` mientras suena una canción.")
             return
-        description = "\n".join([f"{i}. **{song.title}**" for i, song in enumerate(songs[:10], 1)])
-        embed = self.format_embed("❤️ Tus Canciones Favoritas", description)
+        lines = [f"`{i:02d}.` **{song.title}**" for i, song in enumerate(songs[:15], 1)]
+        from sznUI.embeds import EmbedFactory
+        embed = EmbedFactory.build_collection_embed(
+            title=f"❤️ Tus Canciones Favoritas ({len(songs)})",
+            lines=lines,
+            footer_text=f"Colección personal de @{ctx.author.name}",
+        )
         await ctx.send(embed=embed)
 
     @commands.command()
@@ -191,9 +153,12 @@ class MusicDB(commands.Cog):
         if not vc:
             return
 
+        player = core.get_player(ctx)
+        player.radio_temperature = max(0.0, min(1.0, float(temperatura)))
+
         members = ctx.author.voice.channel.members
         user_ids = [str(m.id) for m in members if not m.bot]
-        liked_songs = self.get_liked_songs_by_users(user_ids)
+        liked_songs = await asyncio.to_thread(self.get_liked_songs_by_users, user_ids)
 
         if not liked_songs:
             await ctx.send("📭 Ningún participante en la llamada tiene canciones favoritas. Generando radio basada en el Top del servidor...")
@@ -203,13 +168,13 @@ class MusicDB(commands.Cog):
                 await ctx.send("⚠️ No se pudo generar recomendaciones.")
                 return
             for title, _ in top_songs[:5]:
-                results = core.sp.search(q=title, type='track', limit=1)
+                results = await asyncio.to_thread(core.sp.search, q=title, type='track', limit=1)
                 if results and results.get('tracks', {}).get('items'):
                     seed_id = results['tracks']['items'][0]['id']
-                    core.radio_mode = True
-                    core.radio_seed_id = seed_id
-                    await core.expand_radio_queue(ctx, seed_id=seed_id)
-                    if not core.current_song and core.voice_client and not core.voice_client.is_playing():
+                    player.radio_mode = True
+                    player.radio_seed_id = seed_id
+                    await core.expand_radio_queue(ctx, seed_id=seed_id, seed_title=title)
+                    if not player.current_song and player.voice_client and not player.voice_client.is_playing():
                         await core.play_next(ctx)
                     break
             else:
@@ -223,13 +188,13 @@ class MusicDB(commands.Cog):
         await ctx.send("🎧 **Radio Grupal Activada**: Generando recomendaciones basadas en gustos colectivos...")
         import random
         random_song = random.choice(liked_songs)
-        results = core.sp.search(q=random_song.title, type='track', limit=1)
+        results = await asyncio.to_thread(core.sp.search, q=random_song.title, type='track', limit=1)
         if results and results.get('tracks', {}).get('items'):
             seed_id = results['tracks']['items'][0]['id']
-            core.radio_mode = True
-            core.radio_seed_id = seed_id
-            await core.expand_radio_queue(ctx, seed_id=seed_id)
-            if not core.current_song and core.voice_client and not core.voice_client.is_playing():
+            player.radio_mode = True
+            player.radio_seed_id = seed_id
+            await core.expand_radio_queue(ctx, seed_id=seed_id, seed_title=random_song.title)
+            if not player.current_song and player.voice_client and not player.voice_client.is_playing():
                 await core.play_next(ctx)
         else:
             await ctx.send("⚠️ No se pudo generar recomendaciones basadas en canciones favoritas.")
@@ -243,11 +208,10 @@ class MusicDB(commands.Cog):
             history_titles = self.last_played[:10]
 
         if history_titles:
-            description = "\n".join([
-                f"{i + 1}. **{title}**" for i, title in enumerate(history_titles)
-            ])
-            embed_title = f"🎧 Últimas Canciones Reproducidas - {ctx.guild.name}" if ctx.guild else "🎧 Últimas Canciones Reproducidas"
-            await ctx.send(embed=self.format_embed(embed_title, description))
+            lines = [f"`{i + 1:02d}.` **{title}**" for i, title in enumerate(history_titles)]
+            embed_title = f"🎧 Últimas Canciones Reproducidas — {ctx.guild.name}" if ctx.guild else "🎧 Últimas Canciones Reproducidas"
+            from sznUI.embeds import EmbedFactory
+            await ctx.send(embed=EmbedFactory.build_collection_embed(embed_title, lines))
         else:
             await ctx.send("📭 No hay historial reciente de reproducción en este servidor.")
 
@@ -257,23 +221,20 @@ class MusicDB(commands.Cog):
         guild_id = ctx.guild.id if ctx.guild else None
         top_songs = await asyncio.to_thread(get_top_songs, guild_id=guild_id, limit=10)
         if top_songs:
-            description = "\n".join([
-                f"{i + 1}. **{title}** – `{count} reproducciones`"
+            lines = [
+                f"`{i + 1:02d}.` **{title}** — `{count} reproducciones`"
                 for i, (title, count) in enumerate(top_songs)
-            ])
-            embed_title = f"📈 Top Canciones - {ctx.guild.name}" if ctx.guild else "📈 Top Canciones Más Reproducidas"
-            await ctx.send(embed=self.format_embed(embed_title, description))
+            ]
+            embed_title = f"📈 Top Canciones — {ctx.guild.name}" if ctx.guild else "📈 Top Canciones Más Reproducidas"
+            from sznUI.embeds import EmbedFactory
+            await ctx.send(embed=EmbedFactory.build_collection_embed(embed_title, lines))
         else:
             await ctx.send("📭 No hay estadísticas de canciones en este servidor aún.")
 
     def format_embed(self, title, content):
-        embed = discord.Embed(
-            title=title,
-            description=content,
-            color=0x7d5fff
-        )
-        embed.set_footer(text="Tooodles Music System")
-        return embed
+        from sznUI.embeds import EmbedFactory
+        lines = content.splitlines() if isinstance(content, str) else list(content)
+        return EmbedFactory.build_collection_embed(title, lines)
 
 async def setup(bot):
     musicdb = MusicDB(bot)

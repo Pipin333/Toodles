@@ -146,9 +146,12 @@ Tooodles/
 │                                  #   (5 signal types), trains Implicit ALS (256d, 50 iters) with
 │                                  #   threadpoolctl and Gensim Item2Vec (256d, 100 epochs). Exports .npz.
 ├── sznDB.py                       # MusicDB cog: likes, dislikes, top songs, history, group radio
-├── sznUI.py                       # MusicUI cog: 2-row interactive player controls (Shuffle/Queue modals),
-│                                  #   paginated queue, settings panel, help, interactive playlists CRUD,
-│                                  #   trusted users, logs viewer, debug diagnostics, RecSys train trigger
+├── sznUI/                         # Modular MusicUI front-end package: tokens, embeds, views, cog
+│   ├── __init__.py                # MusicUI Cog, single-panel Now Playing lifecycle, admin/help commands
+│   ├── theme.py                   # UITheme semantic color palette & duration/progress bar formatters
+│   ├── embeds.py                  # EmbedFactory: centralized Discord Embed builders for all Cogs
+│   └── views.py                   # Interactive Views, Modals & Selects (MusicControls, QueuePaginationView,
+│                                  #   SettingsControls, HelpNavigatorView, PlaylistsView)
 ├── alembic/                       # Database migration scripts (Alembic)
 │   ├── env.py                     # Migration environment configuration
 │   ├── script.py.mako             # Migration template
@@ -303,25 +306,22 @@ Manages song statistics, favorites, dislikes, and fuzzy matching.
 
 ---
 
-### `sznUI.py`
+### `sznUI/`
 
-Provides interactive UI controls, configuration panels, and admin tools.
+Centralized Discord front-end package providing semantic color tokens, `EmbedFactory`, interactive Views/Modals, configuration panels, and admin diagnostics:
 
-#### User-Facing Features
-
-- **`PlayerControlsView`**: 2-row interactive player control panel:
-  - Row 1: Pause/Resume (`⏯️`), Skip (`⏭️`), Radio Toggle (`📻`), Stop (`⏹️`), Command Channel (`📍`)
-  - Row 2: Shuffle (`🔀`), Queue (`📜`) interactive popup modal
-- **`notify_now_playing()`**: Sends now-playing embeds with interactive buttons and auto-deletes after 5 minutes.
-- **Progress Bar in `td?np`**: Calculates elapsed time from `current_song_start_time` and renders a visual scrubber bar.
-- **`td?q`**: Paginated view of the queue with 10 songs per page and navigation buttons.
-- **`td?controls`**: Resends the 2-row interactive playback control buttons.
-- **`td?help`**: Context-aware help — shows server commands in guilds or admin/diagnostic commands in DMs.
-- **`td?playlists`**: Interactive manager for saved server playlists:
-  - Dropdown select menu for selecting and playing saved playlists
-  - Pre-filled `PlaylistEditModal` for editing playlist titles and URLs
-  - Deletion confirmation dialogs
-- **`td?settings`**: Interactive settings panel with buttons for prefix, persistence, channel lock, and default radio configuration.
+- **`theme.py` (`UITheme`)**: Defines the semantic color palette (`PRIMARY`, `SPOTIFY`, `RADIO_ML`, `COLLECTION`, `WARNING`, `DANGER`) and shared formatters (`format_duration`, `render_progress_bar`).
+- **`embeds.py` (`EmbedFactory`)**: Single source of truth for constructing all Discord Embeds across `MusicUI`, `MusicCore`, and `MusicDB` (Now Playing, Paginated Queue, Collections, Server Settings, Categorized Help, Playlists, and Preload summaries).
+- **`views.py`**:
+  - **`MusicControls`**: 2-row interactive player control panel:
+    - Row 1: Live Pause/Resume (`⏸️ Pausar` / `▶️ Reanudar` updating in-place), Skip (`⏭️`), Shuffle (`🔀`), Interactive Paginated Queue (`📋`), and Link to Command Channel (`📜`)
+    - Row 2: Like (`❤️`), Dislike (`👎`), Autoplay ML Toggle (`🤖`), Stop (`⏹️`)
+  - **`QueuePaginationView`**: Reusable paginated queue view with automatic boundary button disabling (`⏮️ Primera`, `⬅️ Anterior`, `➡️ Siguiente`, `⏭️ Última`), shared by `td?q` and the `📋 Cola` button.
+  - **`SettingsControls`**: Interactive server configuration dashboard with live toggles for Exclusive Channel (`🔒`), Default Radio (`📻`), Queue Persistence (`💾`), and Custom Prefix Modal (`✏️`).
+  - **`HelpNavigatorView`**: Interactive category selector (`🚀 Resumen`, `🎧 Reproducción y Cola`, `📻 Recomendador IA`, `📚 Playlists`, `⚙️ Admin & Diagnóstico`).
+  - **`PlaylistsView`**: Multi-mode CRUD view (Play, Add, Edit, Delete) for server playlists.
+- **`__init__.py` (`MusicUI` Cog)**:
+  - **`notify_now_playing()`**: Replaces the previous `Now Playing` message per guild (`player.now_playing_message`) so the text channel stays clean without control panel spam.
 
 #### Admin / Trusted Features (Restricted)
 
@@ -648,6 +648,26 @@ Tooodles uses a 3-tier hybrid buffering pipeline designed for instant startup an
 | `client_secret` | Optional | Spotify API Client Secret |
 | `DATABASE_URL` | Optional | PostgreSQL URI (defaults to `sqlite:///tooodles.db`) |
 | `FERNET_KEY` | Optional | 32-byte Fernet key for symmetric encryption (`cryptography.fernet`) of session cookies stored in `AppConfig`. If absent, cookies are stored as plaintext. |
+| `PERSIST_QUEUES` | Optional | Global default for queue persistence across restarts (`true` / `false`, defaults to `false`). |
+| `PROXY_LIST` / `YTDLP_PROXIES` | Optional | Comma-separated list of HTTP/SOCKS proxies for `yt-dlp` rotation. |
+| `cookies` | Optional | Raw Netscape cookies content fallback when `cookies.txt` is not mounted on disk. |
+| `OPENBLAS_NUM_THREADS` / `OMP_NUM_THREADS` / `MKL_NUM_THREADS` | Optional | Thread pool limits (default `1`) to prevent CPU contention during offline RecSys training. |
+
+---
+
+## 🐳 Ejecución con Docker
+
+Cualquier persona que clone el repositorio desde GitHub puede ejecutar el proyecto en cualquier máquina (Linux, macOS Apple Silicon/Intel o Windows con WSL2/Docker Desktop) mediante un único comando:
+
+```bash
+git clone https://github.com/Petiso/Tooodles.git
+cd Tooodles
+cp .env.example .env
+# Edita .env con tu token_priv de Discord y credenciales opcionales de Spotify
+docker compose up --build
+```
+
+El contenedor multi-stage (`python:3.11-slim` + `FFmpeg` + `Node.js 22`) se ejecuta bajo el usuario sin privilegios `appuser` con `HEALTHCHECK` integrado y monta automáticamente los volúmenes locales `./data` y `./logs`.
 
 ---
 
@@ -661,7 +681,7 @@ Tooodles ships with a GitHub Actions workflow at `.github/workflows/deploy.yml` 
 1. You push code to `main` (or click "Run workflow" in GitHub Actions).
 2. GitHub Actions triggers, SSHs into your server using stored secrets.
 3. Runs `./start.sh` on the server: `git pull` → `docker build` → `docker run`.
-4. The running bot receives `SIGTERM` from Docker and enters Graceful Drain (60s timeout).
+4. The running bot receives `SIGTERM` from Docker and enters Graceful Drain (600s timeout).
 5. The current song finishes. The new container starts. Music resumes via `td?j`.
 
 **Required GitHub Secrets:**
@@ -686,9 +706,9 @@ chmod +x start.sh && ./start.sh
 **What `start.sh` executes:**
 1. `git fetch origin main && git reset --hard origin/main` — Force-syncs to latest remote.
 2. `docker build -t tooodles-bot .` — Rebuilds the image with latest code.
-3. `docker stop -t 60 tooodles` — Sends `SIGTERM` and waits up to 60s for graceful drain.
+3. `docker stop -t 600 tooodles` — Sends `SIGTERM` and waits up to 600s (10 min) for graceful drain.
 4. `docker rm tooodles` — Removes the old container.
-5. `docker run -d --name tooodles --restart always --env-file .env` — Launches with persistent volume mounts for `tooodles.db`, `cookies.txt`, `logs/`, and `data/`.
+5. `docker run -d --name tooodles --restart always --stop-timeout 600 --env-file .env` — Launches with persistent volume mounts for `tooodles.db`, `cookies.txt`, `logs/`, and `data/`.
 
 **Persistent Docker Volumes:**
 

@@ -5,99 +5,21 @@ import re
 import tempfile
 import time
 import urllib.parse
-from database import get_db_session, AppConfig
+from database import (
+    _CONFIG_CACHE,
+    AppConfig,
+    get_db_session,
+    is_guild_persist_enabled,
+    load_config,
+    load_guild_queue,
+    save_config,
+    save_guild_queue,
+    set_guild_persist_enabled,
+)
 from sznLogger import get_logger
 
 logger = get_logger("utils")
 
-FERNET_KEY = os.getenv("FERNET_KEY")
-fernet = None
-if FERNET_KEY:
-    try:
-        from cryptography.fernet import Fernet
-        fernet = Fernet(FERNET_KEY)
-    except Exception as e:
-        logger.warning(f"⚠️ Error al inicializar Fernet: {e}")
-
-_CONFIG_CACHE = {}
-
-def save_config(key: str, value: str):
-    _CONFIG_CACHE[key] = value
-    encrypted_val = fernet.encrypt(value.encode()).decode() if fernet else value
-    try:
-        with get_db_session() as session:
-            existing = session.query(AppConfig).filter_by(key=key).first()
-            if existing:
-                existing.value = encrypted_val
-            else:
-                session.add(AppConfig(key=key, value=encrypted_val))
-    except Exception as e:
-        logger.warning(f"⚠️ Error al guardar configuración '{key}' en BD: {e}")
-
-def load_config(key: str) -> str | None:
-    if key in _CONFIG_CACHE:
-        return _CONFIG_CACHE[key]
-    try:
-        with get_db_session() as session:
-            entry = session.query(AppConfig).filter_by(key=key).first()
-            if entry:
-                raw_val = entry.value
-                if fernet and raw_val:
-                    try:
-                        raw_val = fernet.decrypt(raw_val.encode()).decode()
-                    except Exception as e:
-                        logger.error(f"❌ Error al desencriptar valor de {key}: {e}")
-                        return None
-                _CONFIG_CACHE[key] = raw_val
-                return raw_val
-    except Exception as e:
-        logger.warning(f"⚠️ Error al cargar configuración '{key}' de la BD: {e}")
-    return None
-
-def save_guild_queue(guild_id: int, song_queue: list):
-    """Guarda la cola de canciones de un servidor en la BD para persistencia entre reinicios."""
-    try:
-        serializable = []
-        for song in song_queue:
-            if isinstance(song, dict) and song.get('title'):
-                serializable.append({
-                    'title': song.get('title'),
-                    'url': song.get('url'),
-                    'duration': song.get('duration', 0),
-                    'uploader': song.get('uploader', ''),
-                    'origin': song.get('origin', '🎵 Recuperada tras reinicio'),
-                    'user_id': song.get('user_id'),
-                    'username': song.get('username'),
-                    'guild_id': str(guild_id),
-                    'id': song.get('id')
-                })
-        save_config(f"queue_{guild_id}", json.dumps(serializable))
-    except Exception as e:
-        logger.warning(f"⚠️ Error al guardar cola persistente para servidor {guild_id}: {e}")
-
-def load_guild_queue(guild_id: int) -> list:
-    """Carga y limpia la cola de canciones guardada de un servidor desde la BD."""
-    try:
-        raw = load_config(f"queue_{guild_id}")
-        if raw:
-            data = json.loads(raw)
-            if isinstance(data, list) and data:
-                save_config(f"queue_{guild_id}", json.dumps([]))
-                return data
-    except Exception as e:
-        logger.warning(f"⚠️ Error al cargar cola persistente para servidor {guild_id}: {e}")
-    return []
-
-def is_guild_persist_enabled(guild_id: int) -> bool:
-    """Verifica si la persistencia de colas está habilitada para un servidor específico."""
-    val = load_config(f"persist_queue_{guild_id}")
-    if val is not None:
-        return val.lower() in ("on", "true", "1", "yes")
-    return os.getenv("PERSIST_QUEUES", "true").lower() in ("true", "1", "yes")
-
-def set_guild_persist_enabled(guild_id: int, enabled: bool):
-    """Guarda la preferencia de persistencia de colas por servidor."""
-    save_config(f"persist_queue_{guild_id}", "on" if enabled else "off")
 
 def json_to_netscape(cookies_json: list | str) -> str:
     """Convierte una lista o string JSON de cookies a formato Netscape."""
@@ -199,20 +121,25 @@ async def fetch_stealth_cookies() -> str | None:
 # ==============================================================================
 
 def get_cookie_file_path() -> str | None:
+    """Retorna la ruta absoluta al archivo de cookies válido (raíz o archivo compartido del sistema)."""
     # 1. Prioridad: Archivo cookies.txt directo en la raíz del proyecto
     if os.path.exists("cookies.txt") and os.path.getsize("cookies.txt") > 50:
         return os.path.abspath("cookies.txt")
 
-    # 2. Fallback: Base de datos SQLite / Variable de entorno
+    # 2. Fallback: Base de datos SQLite / Variable de entorno reutilizando un único archivo compartido
     cookies_content = load_config('cookies') or os.getenv('cookies')
     if cookies_content and len(cookies_content.strip()) >= 50:
         try:
-            temp = tempfile.NamedTemporaryFile(delete=False, mode='w', encoding='utf-8', suffix='.txt', newline='\n')
-            temp.write(cookies_content)
-            temp.close()
-            return temp.name
-        except Exception:
-            pass
+            shared_cookie_path = os.path.join(tempfile.gettempdir(), "tooodles_cookies.txt")
+            with open(shared_cookie_path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(cookies_content)
+            try:
+                os.chmod(shared_cookie_path, 0o600)
+            except OSError:
+                pass
+            return shared_cookie_path
+        except Exception as e:
+            logger.warning(f"⚠️ No se pudo escribir archivo temporal de cookies: {e}")
 
     return None
 

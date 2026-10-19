@@ -65,21 +65,20 @@ class MusicRadioMixin:
         clean_song, extracted_artist = _clean_title_for_search(target_title) if target_title else ("", None)
 
         logger.debug(f"📻 [RADIO DEBUG] [{ctx.guild.name}] target_title='{target_title}'")
-        recommended_titles = []
+        def _build_recommendations() -> list[str]:
+            recs: list[str] = []
+            if self.sp and target_title:
+                try:
+                    search_q = f"artist:{extracted_artist} track:{clean_song}" if extracted_artist else clean_song
+                    search_result = self.sp.search(q=search_q, type='track', limit=1)
 
-        if self.sp and target_title:
-            try:
-                search_q = f"artist:{extracted_artist} track:{clean_song}" if extracted_artist else clean_song
-                search_result = self.sp.search(q=search_q, type='track', limit=1)
-
-                seed_artist = extracted_artist
-                seed_artist_id = None
-                if search_result and search_result.get('tracks', {}).get('items'):
-                    found_track = search_result['tracks']['items'][0]
-                    seed_artist = found_track['artists'][0]['name']
-                    seed_artist_id = found_track['artists'][0]['id']
-                else:
-                    if seed_artist:
+                    seed_artist = extracted_artist
+                    seed_artist_id = None
+                    if search_result and search_result.get('tracks', {}).get('items'):
+                        found_track = search_result['tracks']['items'][0]
+                        seed_artist = found_track['artists'][0]['name']
+                        seed_artist_id = found_track['artists'][0]['id']
+                    elif seed_artist:
                         try:
                             artist_res = self.sp.search(q=f"artist:{seed_artist}", type='artist', limit=1)
                             if artist_res and artist_res.get('artists', {}).get('items'):
@@ -88,118 +87,121 @@ class MusicRadioMixin:
                         except Exception as e:
                             logger.warning(f"⚠️ [RADIO] Búsqueda de artista falló: {e}")
 
-                if seed_artist:
-                    # Capa 1: Mismo artista
-                    try:
-                        artist_search = self.sp.search(q=f"artist:{seed_artist}", type='track', limit=30)
-                        artist_tracks = artist_search.get('tracks', {}).get('items', [])
-                        random.shuffle(artist_tracks)
-                        for t in artist_tracks:
-                            full_name = f"{t['name']} - {t['artists'][0]['name']}"
-                            if self._radio_is_unique(player, full_name, recommended_titles, queued_titles):
-                                recommended_titles.append(full_name)
-                                if len(recommended_titles) >= 2:
-                                    break
-                    except Exception as e:
-                        logger.warning(f"⚠️ [RADIO] Capa 1 falló: {e}")
-
-                    # Capa 2: Géneros consolidados
-                    if len(recommended_titles) < 5:
+                    if seed_artist:
+                        # Capa 1: Mismo artista
                         try:
-                            genres = []
-                            artist_ids = getattr(player, 'recent_artist_ids', [])
-                            if artist_ids:
-                                try:
-                                    artists_info = self.sp.artists(artist_ids)
-                                    for artist in artists_info.get('artists', []):
-                                        if artist and artist.get('genres'):
-                                            genres.extend(artist['genres'])
-                                except Exception as hist_err:
-                                    logger.warning(f"⚠️ [RADIO] Error al consultar historial de artistas: {hist_err}")
-
-                            if not genres and seed_artist_id:
-                                try:
-                                    artist_info = self.sp.artist(seed_artist_id)
-                                    genres = artist_info.get('genres', [])
-                                except Exception as fallback_err:
-                                    logger.warning(f"⚠️ [RADIO] Error en fallback de artista: {fallback_err}")
-
-                            expanded_genres = self._expand_genres(list(set(genres)))
-                            if expanded_genres:
-                                shuffled_genres = list(expanded_genres)
-                                random.shuffle(shuffled_genres)
-                                
-                                for gen_name in shuffled_genres:
-                                    if len(recommended_titles) >= 5:
+                            artist_search = self.sp.search(q=f"artist:{seed_artist}", type='track', limit=30)
+                            artist_tracks = artist_search.get('tracks', {}).get('items', [])
+                            random.shuffle(artist_tracks)
+                            for t in artist_tracks:
+                                full_name = f"{t['name']} - {t['artists'][0]['name']}"
+                                if self._radio_is_unique(player, full_name, recs, queued_titles):
+                                    recs.append(full_name)
+                                    if len(recs) >= 2:
                                         break
-                                    try:
-                                        gen_search = self.sp.search(q=f'genre:"{gen_name}"', type='track', limit=20)
-                                        gen_tracks = gen_search.get('tracks', {}).get('items', [])
-                                        if gen_tracks:
-                                            gen_tracks = sorted(gen_tracks, key=lambda x: x.get('popularity', 0), reverse=True)
-                                            popular_subset = gen_tracks[:10]
-                                            random.shuffle(popular_subset)
+                        except Exception as e:
+                            logger.warning(f"⚠️ [RADIO] Capa 1 falló: {e}")
 
-                                            for t in popular_subset:
-                                                t_artist = t['artists'][0]['name']
-                                                already_rec = [r.split(" - ")[1].lower().strip() for r in recommended_titles if " - " in r]
-                                                if t_artist.lower().strip() in already_rec:
-                                                    continue
-
-                                                full_name = f"{t['name']} - {t_artist}"
-                                                if t_artist.lower() != seed_artist.lower() and self._radio_is_unique(player, full_name, recommended_titles, queued_titles):
-                                                    recommended_titles.append(full_name)
-                                                    break
-                                    except Exception:
-                                        pass
-                        except Exception as artist_info_err:
-                            logger.warning(f"⚠️ [RADIO] Error procesando géneros: {artist_info_err}")
-
-                    # Capa 3: Similar queries
-                    if len(recommended_titles) < 5:
-                        similar_queries = [
-                            f"{seed_artist} similar artists",
-                            f"fans also like {seed_artist}",
-                            f"{clean_song} similar",
-                        ]
-                        for sq in similar_queries:
-                            if len(recommended_titles) >= 5:
-                                break
+                        # Capa 2: Géneros consolidados
+                        if len(recs) < 5:
                             try:
-                                sim_results = self.sp.search(q=sq, type='track', limit=20)
-                                sim_tracks = sim_results.get('tracks', {}).get('items', [])
-                                if sim_tracks:
-                                    sim_tracks = sorted(sim_tracks, key=lambda x: x.get('popularity', 0), reverse=True)
-                                    popular_subset = sim_tracks[:10]
-                                    random.shuffle(popular_subset)
+                                genres = []
+                                artist_ids = getattr(player, 'recent_artist_ids', [])
+                                if artist_ids:
+                                    try:
+                                        artists_info = self.sp.artists(artist_ids)
+                                        for artist in artists_info.get('artists', []):
+                                            if artist and artist.get('genres'):
+                                                genres.extend(artist['genres'])
+                                    except Exception as hist_err:
+                                        logger.warning(f"⚠️ [RADIO] Error al consultar historial de artistas: {hist_err}")
 
-                                    for t in popular_subset:
-                                        t_artist = t['artists'][0]['name']
-                                        already_rec = [r.split(" - ")[1].lower().strip() for r in recommended_titles if " - " in r]
-                                        if t_artist.lower().strip() in already_rec:
-                                            continue
+                                if not genres and seed_artist_id:
+                                    try:
+                                        artist_info = self.sp.artist(seed_artist_id)
+                                        genres = artist_info.get('genres', [])
+                                    except Exception as fallback_err:
+                                        logger.warning(f"⚠️ [RADIO] Error en fallback de artista: {fallback_err}")
 
-                                        full_name = f"{t['name']} - {t_artist}"
-                                        if t_artist.lower() != seed_artist.lower() and self._radio_is_unique(player, full_name, recommended_titles, queued_titles):
-                                            recommended_titles.append(full_name)
+                                expanded_genres = self._expand_genres(list(set(genres)))
+                                if expanded_genres:
+                                    shuffled_genres = list(expanded_genres)
+                                    random.shuffle(shuffled_genres)
+
+                                    for gen_name in shuffled_genres:
+                                        if len(recs) >= 5:
                                             break
-                            except Exception:
-                                pass
-            except Exception as sp_err:
-                logger.warning(f"⚠️ [RADIO] Error general de Spotify: {sp_err}")
+                                        try:
+                                            gen_search = self.sp.search(q=f'genre:"{gen_name}"', type='track', limit=20)
+                                            gen_tracks = gen_search.get('tracks', {}).get('items', [])
+                                            if gen_tracks:
+                                                gen_tracks = sorted(gen_tracks, key=lambda x: x.get('popularity', 0), reverse=True)
+                                                popular_subset = gen_tracks[:10]
+                                                random.shuffle(popular_subset)
 
-        # Fallback BD
-        if len(recommended_titles) < 5:
-            with get_db_session() as session:
-                songs = session.query(Song).all()
-                if songs:
-                    shuffled_db = list(songs)
-                    random.shuffle(shuffled_db)
-                    for s in shuffled_db:
-                        if self._radio_is_unique(player, s.title, recommended_titles, queued_titles):
-                            recommended_titles.append(s.title)
-                            if len(recommended_titles) >= 5:
-                                break
+                                                for t in popular_subset:
+                                                    t_artist = t['artists'][0]['name']
+                                                    already_rec = [r.split(" - ")[1].lower().strip() for r in recs if " - " in r]
+                                                    if t_artist.lower().strip() in already_rec:
+                                                        continue
+
+                                                    full_name = f"{t['name']} - {t_artist}"
+                                                    if t_artist.lower() != seed_artist.lower() and self._radio_is_unique(player, full_name, recs, queued_titles):
+                                                        recs.append(full_name)
+                                                        break
+                                        except Exception as gen_err:
+                                            logger.debug(f"⚠️ [RADIO] Búsqueda por género '{gen_name}' omitida: {gen_err}")
+                            except Exception as artist_info_err:
+                                logger.warning(f"⚠️ [RADIO] Error procesando géneros: {artist_info_err}")
+
+                        # Capa 3: Similar queries
+                        if len(recs) < 5:
+                            similar_queries = [
+                                f"{seed_artist} similar artists",
+                                f"fans also like {seed_artist}",
+                                f"{clean_song} similar",
+                            ]
+                            for sq in similar_queries:
+                                if len(recs) >= 5:
+                                    break
+                                try:
+                                    sim_results = self.sp.search(q=sq, type='track', limit=20)
+                                    sim_tracks = sim_results.get('tracks', {}).get('items', [])
+                                    if sim_tracks:
+                                        sim_tracks = sorted(sim_tracks, key=lambda x: x.get('popularity', 0), reverse=True)
+                                        popular_subset = sim_tracks[:10]
+                                        random.shuffle(popular_subset)
+
+                                        for t in popular_subset:
+                                            t_artist = t['artists'][0]['name']
+                                            already_rec = [r.split(" - ")[1].lower().strip() for r in recs if " - " in r]
+                                            if t_artist.lower().strip() in already_rec:
+                                                continue
+
+                                            full_name = f"{t['name']} - {t_artist}"
+                                            if t_artist.lower() != seed_artist.lower() and self._radio_is_unique(player, full_name, recs, queued_titles):
+                                                recs.append(full_name)
+                                                break
+                                except Exception as sim_err:
+                                    logger.debug(f"⚠️ [RADIO] Búsqueda similar '{sq}' omitida: {sim_err}")
+                except Exception as sp_err:
+                    logger.warning(f"⚠️ [RADIO] Error general de Spotify: {sp_err}")
+
+            # Fallback BD
+            if len(recs) < 5:
+                with get_db_session() as session:
+                    songs = session.query(Song.title).all()
+                    if songs:
+                        shuffled_db = [t for (t,) in songs if t]
+                        random.shuffle(shuffled_db)
+                        for s_title in shuffled_db:
+                            if self._radio_is_unique(player, s_title, recs, queued_titles):
+                                recs.append(s_title)
+                                if len(recs) >= 5:
+                                    break
+            return recs
+
+        recommended_titles = await asyncio.to_thread(_build_recommendations)
 
         if not recommended_titles:
             await ctx.send("⚠️ No se pudieron generar recomendaciones para la radio.")
@@ -283,7 +285,7 @@ class MusicRadioMixin:
         if not self.sp or not title:
             return
 
-        async def _async_lookup():
+        def _sync_lookup():
             try:
                 clean_song, extracted_artist = _clean_title_for_search(title)
                 search_q = f"artist:{extracted_artist} track:{clean_song}" if extracted_artist else clean_song
@@ -306,7 +308,7 @@ class MusicRadioMixin:
                         artist_info = self.sp.artist(artist_id)
                         genres_list = artist_info.get('genres', [])
                         genres_str = ",".join(genres_list) if genres_list else ""
-                        
+
                         from database import update_song_features
                         update_song_features(
                             title=title,
@@ -319,7 +321,7 @@ class MusicRadioMixin:
             except Exception as e:
                 logger.warning(f"⚠️ Error registrando artista reciente para radio: {e}")
 
-        self.bot.loop.create_task(_async_lookup())
+        self.bot.loop.create_task(asyncio.to_thread(_sync_lookup))
 
     async def _fill_queue_from_recsys(self, ctx, player):
         """Llena la cola usando el motor de recomendación ML cuando autoplay está activo."""

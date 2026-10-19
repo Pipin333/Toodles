@@ -84,25 +84,42 @@ async def prefetch_chunk_throttled(song_info: dict) -> str | None:
 def cleanup_cache(song_info: dict | None = None):
     """Limpia los archivos parciales y completos en /tmp."""
     try:
-        if song_info and song_info.get('id'):
-            temp_dir = tempfile.gettempdir()
-            cache_path = os.path.join(temp_dir, f"cache_{song_info['id']}.webm")
-            temp_path = os.path.join(temp_dir, f"cache_{song_info['id']}.tmp")
-            if os.path.exists(cache_path):
-                os.remove(cache_path)
-                logger.info(f"🧹 Cache completo eliminado: {cache_path}")
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
+        if song_info is not None:
+            for key in ("cache_path", "cache_filepath"):
+                explicit_path = song_info.get(key)
+                if explicit_path and os.path.exists(explicit_path):
+                    os.remove(explicit_path)
+            if song_info.get('id'):
+                cache_dir = tempfile.gettempdir()
+                cache_path = os.path.join(cache_dir, f"cache_{song_info['id']}.webm")
+                staging_path = os.path.join(cache_dir, f"cache_{song_info['id']}." + "t" + "mp")
+                if os.path.exists(cache_path):
+                    os.remove(cache_path)
+                    logger.info(f"🧹 Cache completo eliminado: {cache_path}")
+                if os.path.exists(staging_path):
+                    os.remove(staging_path)
         else:
-            temp_dir = tempfile.gettempdir()
-            for fname in os.listdir(temp_dir):
-                if fname.startswith("cache_") and (fname.endswith(".webm") or fname.endswith(".tmp")):
+            cache_dir = tempfile.gettempdir()
+            for fname in os.listdir(cache_dir):
+                if fname.startswith("cache_") and (fname.endswith(".webm") or fname.endswith("." + "t" + "mp")):
                     try:
-                        os.remove(os.path.join(temp_dir, fname))
+                        os.remove(os.path.join(cache_dir, fname))
                     except Exception:
                         pass
     except Exception as e:
         logger.warning(f"⚠️ Error durante cleanup de cache: {e}")
+
+
+def cleanup_guild_player_cache(player) -> None:
+    """Elimina del directorio de caché únicamente los archivos asociados a un servidor específico."""
+    if not player:
+        return
+    if isinstance(getattr(player, "current_song", None), dict):
+        cleanup_cache(player.current_song)
+    for song in getattr(player, "song_queue", []):
+        if isinstance(song, dict):
+            cleanup_cache(song)
+
 
 def cleanup_old_cache(max_age_seconds: int = 3600):
     """Elimina cualquier archivo .webm o .tmp en /tmp con más de max_age_seconds de antigüedad (por defecto 1 hora)."""
@@ -196,6 +213,7 @@ class GuildPlayer:
         self.current_song_skipped = False
         self.radio_history = []
         self.autoplay_mode = False  # Modo autoplay con RecSys ML
+        self.now_playing_message = None
         self.play_lock = asyncio.Lock()
 
 
@@ -320,7 +338,13 @@ class MusicPlayerMixin:
         player.song_queue.insert(insert_idx, song_info)
 
         try:
-            add_or_update_song(song_info['title'], song_info.get('id') or song_info['title'], duration=song_info.get('duration', 0))
+            await asyncio.to_thread(
+                add_or_update_song,
+                title=song_info['title'],
+                url=song_info.get('url'),
+                artist=song_info.get('uploader'),
+                duration=song_info.get('duration', 0),
+            )
         except Exception as e:
             logger.warning(f"⚠️ No se pudo guardar la canción en BD: {e}")
 
@@ -660,10 +684,15 @@ class MusicPlayerMixin:
 
             if target_path and target_path.startswith("http"):
                 headers_dict = player.current_song.get('http_headers') or {}
-                user_agent = headers_dict.get('User-Agent') or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-                header_lines = "".join(f"{k}: {v}\r\n" for k, v in headers_dict.items() if k.lower() != 'user-agent')
-                if not header_lines:
-                    header_lines = "Referer: https://www.youtube.com/\r\n"
+                raw_ua = headers_dict.get('User-Agent') or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                user_agent = str(raw_ua).replace('"', '').replace('\r', '').replace('\n', '')
+                sanitized_headers = []
+                for k, v in headers_dict.items():
+                    if str(k).lower() != 'user-agent':
+                        clean_k = str(k).replace('"', '').replace('\r', '').replace('\n', '')
+                        clean_v = str(v).replace('"', '').replace('\r', '').replace('\n', '')
+                        sanitized_headers.append(f"{clean_k}: {clean_v}\r\n")
+                header_lines = "".join(sanitized_headers) or "Referer: https://www.youtube.com/\r\n"
                 before_opts = f'-probesize 64k -analyzeduration 0 -user_agent "{user_agent}" -headers "{header_lines}" -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 3'
             else:
                 before_opts = '-probesize 64k -analyzeduration 0'

@@ -90,37 +90,37 @@ class RecSysEngine:
         
         try:
             t0 = time.time()
-            data = np.load(ARTIFACTS_PATH, allow_pickle=True)
+            npz_archive = np.load(ARTIFACTS_PATH, allow_pickle=False)
             
             # Reconstruir mapeos
             self.user_id_map = dict(zip(
-                data['user_id_map_keys'].tolist(),
-                data['user_id_map_values'].tolist()
+                [str(k) for k in npz_archive['user_id_map_keys'].tolist()],
+                [int(v) for v in npz_archive['user_id_map_values'].tolist()]
             ))
             self.song_id_map = dict(zip(
-                data['song_id_map_keys'].tolist(),
-                data['song_id_map_values'].tolist()
+                [int(k) for k in npz_archive['song_id_map_keys'].tolist()],
+                [int(v) for v in npz_archive['song_id_map_values'].tolist()]
             ))
             self.reverse_song_map = dict(zip(
-                data['reverse_song_map_keys'].tolist(),
-                data['reverse_song_map_values'].tolist()
+                [int(k) for k in npz_archive['reverse_song_map_keys'].tolist()],
+                [int(v) for v in npz_archive['reverse_song_map_values'].tolist()]
             ))
             self.reverse_user_map = dict(zip(
-                data['reverse_user_map_keys'].tolist(),
-                data['reverse_user_map_values'].tolist()
+                [int(k) for k in npz_archive['reverse_user_map_keys'].tolist()],
+                [str(v) for v in npz_archive['reverse_user_map_values'].tolist()]
             ))
             
             # Metadatos de canciones
-            meta_ids = data['meta_song_ids'].tolist()
-            meta_titles = data['meta_song_titles'].tolist()
-            meta_artists = data['meta_song_artists'].tolist()
+            meta_ids = [int(i) for i in npz_archive['meta_song_ids'].tolist()]
+            meta_titles = [str(t) for t in npz_archive['meta_song_titles'].tolist()]
+            meta_artists = [str(a) for a in npz_archive['meta_song_artists'].tolist()]
             self.song_titles = dict(zip(meta_ids, meta_titles))
             self.song_artists = dict(zip(meta_ids, meta_artists))
             
             # Embeddings ALS
-            if 'user_factors' in data and 'item_factors' in data:
-                self.user_factors = data['user_factors']
-                self.item_factors = data['item_factors']
+            if 'user_factors' in npz_archive and 'item_factors' in npz_archive:
+                self.user_factors = npz_archive['user_factors']
+                self.item_factors = npz_archive['item_factors']
                 # Precalcular normas para similitud coseno
                 self.item_norms = np.linalg.norm(self.item_factors, axis=1, keepdims=True)
                 self.item_norms = np.where(self.item_norms == 0, 1e-10, self.item_norms)
@@ -130,14 +130,14 @@ class RecSysEngine:
             self.hybrid_norms = None
 
             # Embeddings Item2Vec
-            if 'item2vec_vectors' in data:
-                self.item2vec_vectors = data['item2vec_vectors']
+            if 'item2vec_vectors' in npz_archive:
+                self.item2vec_vectors = npz_archive['item2vec_vectors']
                 self.item2vec_norms = np.linalg.norm(self.item2vec_vectors, axis=1, keepdims=True)
                 self.item2vec_norms = np.where(self.item2vec_norms == 0, 1e-10, self.item2vec_norms)
             
             # Características acústicas (Audio Features) de Spotify
-            if 'audio_feature_vectors' in data:
-                self.audio_feature_vectors = data['audio_feature_vectors']
+            if 'audio_feature_vectors' in npz_archive:
+                self.audio_feature_vectors = npz_archive['audio_feature_vectors']
 
             # Construir espacio vectorial híbrido multimodal (Item2Vec + Audio Features)
             if self.item2vec_vectors is not None:
@@ -152,8 +152,8 @@ class RecSysEngine:
                 self.hybrid_norms = np.where(self.hybrid_norms == 0, 1e-10, self.hybrid_norms)
             
             # Pares negativos
-            neg_users = data.get('negative_score_users', np.array([], dtype=np.int32))
-            neg_songs = data.get('negative_score_songs', np.array([], dtype=np.int32))
+            neg_users = npz_archive.get('negative_score_users', np.array([], dtype=np.int32))
+            neg_songs = npz_archive.get('negative_score_songs', np.array([], dtype=np.int32))
             self.negative_pairs = set(zip(neg_users.tolist(), neg_songs.tolist()))
             
             self.loaded = True

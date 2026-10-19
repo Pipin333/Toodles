@@ -1,0 +1,13 @@
+services:
+  tooodles:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tooodles
+    restart: unless-stopped
+    stop_grace_period: 10m
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs

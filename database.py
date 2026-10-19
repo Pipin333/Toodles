@@ -1,12 +1,30 @@
 import os
+import random
 from contextlib import contextmanager
-from datetime import datetime
-from sqlalchemy import create_engine, Column, Integer, String, Float, ForeignKey, DateTime, event
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from datetime import datetime, timezone
+from sqlalchemy import (
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    create_engine,
+    event,
+    func,
+    inspect,
+    text,
+)
+from sqlalchemy.orm import declarative_base, sessionmaker
 from sznLogger import get_logger
 
 logger = get_logger("database")
+
+
+def _utcnow() -> datetime:
+    """Retorna la fecha y hora actual en UTC (naive para compatibilidad SQLite)."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
 
 # URL de la base de datos desde las variables de entorno (Railway / local fallback)
 DATABASE_URL = os.getenv('DATABASE_URL')
@@ -75,7 +93,7 @@ class UserLike(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(String, index=True, nullable=False)
     song_id = Column(Integer, ForeignKey('songs.id'), nullable=False)
-    timestamp = Column(DateTime, default=datetime.utcnow)
+    timestamp = Column(DateTime, default=_utcnow)
 
 # Modelo para no me gusta / feedback negativo explícito por usuario
 class UserDislike(Base):
@@ -84,7 +102,7 @@ class UserDislike(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(String, index=True, nullable=False)
     song_id = Column(Integer, ForeignKey('songs.id'), nullable=False)
-    timestamp = Column(DateTime, default=datetime.utcnow)
+    timestamp = Column(DateTime, default=_utcnow)
 
 # Modelo para playlists guardadas por el servidor
 class SavedPlaylist(Base):
@@ -95,7 +113,7 @@ class SavedPlaylist(Base):
     user_id = Column(String, index=True, nullable=False)
     name = Column(String, nullable=False)
     url = Column(String, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow)
 
 # Modelo para usuarios de confianza (Trusted Users) con acceso a comandos de Admin/DM
 class TrustedUser(Base):
@@ -103,7 +121,7 @@ class TrustedUser(Base):
 
     user_id = Column(String, primary_key=True)
     username = Column(String, nullable=True)
-    added_at = Column(DateTime, default=datetime.utcnow)
+    added_at = Column(DateTime, default=_utcnow)
 
 # Modelo para registro de reproducción y telemetría de recomendador
 class PlayLog(Base):
@@ -114,7 +132,7 @@ class PlayLog(Base):
     username = Column(String)
     song_id = Column(Integer, ForeignKey('songs.id'), nullable=False)
     guild_id = Column(String, index=True)
-    played_at = Column(DateTime, default=datetime.utcnow)
+    played_at = Column(DateTime, default=_utcnow)
     listened_duration = Column(Integer)  # en segundos
     completed = Column(Integer)  # 1 si terminó completo, 0 si fue skip
     skipped_at = Column(Integer)  # segundos transcurridos al saltar
@@ -135,26 +153,32 @@ def get_db_session():
     finally:
         session.close()
 
+_STATIC_SONG_COLUMN_MIGRATIONS = {
+    "spotify_id": text("ALTER TABLE songs ADD COLUMN spotify_id VARCHAR"),
+    "genres": text("ALTER TABLE songs ADD COLUMN genres VARCHAR"),
+    "popularity": text("ALTER TABLE songs ADD COLUMN popularity INTEGER"),
+    "danceability": text("ALTER TABLE songs ADD COLUMN danceability FLOAT"),
+    "energy": text("ALTER TABLE songs ADD COLUMN energy FLOAT"),
+    "valence": text("ALTER TABLE songs ADD COLUMN valence FLOAT"),
+    "tempo": text("ALTER TABLE songs ADD COLUMN tempo FLOAT"),
+    "acousticness": text("ALTER TABLE songs ADD COLUMN acousticness FLOAT"),
+    "instrumentalness": text("ALTER TABLE songs ADD COLUMN instrumentalness FLOAT"),
+    "liveness": text("ALTER TABLE songs ADD COLUMN liveness FLOAT"),
+    "speechiness": text("ALTER TABLE songs ADD COLUMN speechiness FLOAT"),
+}
+
+
 def setup_database():
-    """Crea todas las tablas si no existen y maneja migraciones de columnas de forma segura."""
-    from sqlalchemy import text
+    """Crea todas las tablas si no existen y aplica migraciones de columnas faltantes."""
     Base.metadata.create_all(engine)
-    
-    # Manejar migración de nuevas columnas con transacciones explícitas
+
+    existing_cols = {c["name"] for c in inspect(engine).get_columns("songs")}
     with engine.begin() as conn:
-        audio_cols = [
-            ("spotify_id", "VARCHAR"), ("genres", "VARCHAR"), ("popularity", "INTEGER"),
-            ("danceability", "FLOAT"), ("energy", "FLOAT"), ("valence", "FLOAT"),
-            ("tempo", "FLOAT"), ("acousticness", "FLOAT"), ("instrumentalness", "FLOAT"),
-            ("liveness", "FLOAT"), ("speechiness", "FLOAT")
-        ]
-        for col_name, col_type in audio_cols:
-            try:
-                conn.execute(text(f"ALTER TABLE songs ADD COLUMN {col_name} {col_type}"))
+        for col_name, ddl_stmt in _STATIC_SONG_COLUMN_MIGRATIONS.items():
+            if col_name not in existing_cols:
+                conn.execute(ddl_stmt)
                 logger.info(f"🗄️ Columna '{col_name}' agregada exitosamente a 'songs'.")
-            except Exception:
-                pass  # La columna ya existe
-            
+
     logger.info("🗄️ Tablas de base de datos creadas/verificadas correctamente.")
 
 def add_or_update_song(title, url=None, artist=None, duration=0):
@@ -277,6 +301,119 @@ def update_song_features(title, spotify_id=None, genres=None, popularity=None):
                 song.genres = genres
             if popularity is not None:
                 song.popularity = popularity
+
+def toggle_like_song(user_id: str, song_title: str) -> str:
+    """Alterna el estado de 'me gusta' de un usuario sobre una canción.
+
+    Args:
+        user_id: Identificador de Discord del usuario.
+        song_title: Título de la canción en reproducción.
+
+    Returns:
+        'added' si se agregó a favoritas, 'removed' si se eliminó, 'not_found' si no existe.
+    """
+    uid = str(user_id)
+    with get_db_session() as session:
+        song = session.query(Song).filter_by(title=song_title).first()
+        if not song:
+            return "not_found"
+        existing = session.query(UserLike).filter_by(user_id=uid, song_id=song.id).first()
+        if existing:
+            session.delete(existing)
+            return "removed"
+        session.add(UserLike(user_id=uid, song_id=song.id))
+        return "added"
+
+
+def like_song(user_id: str, song_title: str) -> bool:
+    """Registra un me gusta explícito de un usuario hacia una canción si aún no existe."""
+    try:
+        uid = str(user_id)
+        with get_db_session() as session:
+            song = session.query(Song).filter_by(title=song_title).first()
+            if not song:
+                return False
+            existing = session.query(UserLike).filter_by(user_id=uid, song_id=song.id).first()
+            if not existing:
+                session.add(UserLike(user_id=uid, song_id=song.id))
+                return True
+            return False
+    except Exception as err:
+        logger.warning(f"⚠️ Error al dar me gusta: {err}")
+        return False
+
+
+def unlike_song(user_id: str, song_title: str) -> bool:
+    """Elimina un me gusta existente de un usuario hacia una canción."""
+    try:
+        uid = str(user_id)
+        with get_db_session() as session:
+            song = session.query(Song).filter_by(title=song_title).first()
+            if not song:
+                return False
+            existing = session.query(UserLike).filter_by(user_id=uid, song_id=song.id).first()
+            if existing:
+                session.delete(existing)
+                return True
+            return False
+    except Exception as err:
+        logger.warning(f"⚠️ Error al eliminar me gusta: {err}")
+        return False
+
+
+def get_liked_songs_by_user(user_id: str) -> list[Song]:
+    """Obtiene todas las canciones marcadas como favoritas por un usuario."""
+    try:
+        with get_db_session() as session:
+            likes = session.query(UserLike).filter_by(user_id=str(user_id)).all()
+            if not likes:
+                return []
+            song_ids = [like.song_id for like in likes]
+            songs = session.query(Song).filter(Song.id.in_(song_ids)).all()
+            session.expunge_all()
+            return songs
+    except Exception as err:
+        logger.warning(f"⚠️ Error al obtener canciones favoritas: {err}")
+        return []
+
+
+def get_liked_songs_by_users(user_ids: list[str]) -> list[Song]:
+    """Obtiene la unión de canciones favoritas de un grupo de usuarios."""
+    if not user_ids:
+        return []
+    try:
+        str_user_ids = [str(uid) for uid in user_ids]
+        with get_db_session() as session:
+            likes = session.query(UserLike).filter(UserLike.user_id.in_(str_user_ids)).all()
+            if not likes:
+                return []
+            song_ids = {like.song_id for like in likes}
+            songs = session.query(Song).filter(Song.id.in_(song_ids)).all()
+            session.expunge_all()
+            return songs
+    except Exception as err:
+        logger.warning(f"⚠️ Error al obtener canciones favoritas del grupo: {err}")
+        return []
+
+
+def find_similar_song(query: str, threshold: int = 90) -> Song | None:
+    """Busca una canción en el catálogo por coincidencia difusa de título."""
+    try:
+        from rapidfuzz import process
+        with get_db_session() as session:
+            songs = session.query(Song).all()
+            choices = {song.title: song for song in songs if song.title}
+            if not choices:
+                return None
+            match = process.extractOne(query, choices.keys())
+            if match and match[1] >= threshold:
+                matched_song = choices[match[0]]
+                session.expunge(matched_song)
+                return matched_song
+    except Exception as err:
+        logger.warning(f"⚠️ Error en búsqueda difusa de canciones: {err}")
+    return None
+
 
 def log_dislike_event(user_id, song_title):
     """Registra un dislike explícito de un usuario hacia una canción."""
@@ -633,11 +770,11 @@ def bulk_preload_tracks(tracks: list[dict], user_id: str, username: str = None, 
     Returns:
         dict con 'total': int, 'new_songs': int, 'likes_added': int
     """
-    from datetime import datetime, timedelta
+    from datetime import timedelta
     
     user_id_str = str(user_id) if user_id else "unknown"
     guild_id_str = str(guild_id) if guild_id else "default_guild"
-    base_time = datetime.utcnow() - timedelta(minutes=len(tracks))
+    base_time = _utcnow() - timedelta(minutes=len(tracks))
     
     new_songs_count = 0
     likes_count = 0
@@ -693,3 +830,108 @@ def bulk_preload_tracks(tracks: list[dict], user_id: str, username: str = None, 
         'new_songs': new_songs_count,
         'likes_added': likes_count
     }
+
+
+_FERNET_KEY = os.getenv("FERNET_KEY")
+_fernet_cipher = None
+if _FERNET_KEY:
+    try:
+        from cryptography.fernet import Fernet
+        _fernet_cipher = Fernet(_FERNET_KEY)
+    except Exception as fernet_err:
+        logger.warning(f"⚠️ Error al inicializar Fernet: {fernet_err}")
+
+_CONFIG_CACHE: dict[str, str | None] = {}
+
+
+def save_config(key: str, config_value: str) -> None:
+    """Guarda un par clave-valor en la tabla AppConfig (cifrado con Fernet si está activo)."""
+    import json  # noqa: F401
+    _CONFIG_CACHE[key] = config_value
+    encrypted_str = (
+        _fernet_cipher.encrypt(config_value.encode()).decode()
+        if _fernet_cipher
+        else config_value
+    )
+    try:
+        with get_db_session() as session:
+            existing = session.query(AppConfig).filter_by(key=key).first()
+            if existing:
+                existing.value = encrypted_str
+            else:
+                session.add(AppConfig(key=key, value=encrypted_str))
+    except Exception as err:
+        logger.warning(f"⚠️ Error al guardar configuración '{key}' en BD: {err}")
+
+
+def load_config(key: str) -> str | None:
+    """Carga un valor de configuración desde caché en memoria o la tabla AppConfig."""
+    if key in _CONFIG_CACHE:
+        return _CONFIG_CACHE[key]
+    try:
+        with get_db_session() as session:
+            entry = session.query(AppConfig).filter_by(key=key).first()
+            if entry:
+                stored_str = entry.value
+                if _fernet_cipher and stored_str:
+                    try:
+                        stored_str = _fernet_cipher.decrypt(stored_str.encode()).decode()
+                    except Exception as err:
+                        logger.error(f"❌ Error al desencriptar valor de {key}: {err}")
+                        return None
+                _CONFIG_CACHE[key] = stored_str
+                return stored_str
+    except Exception as err:
+        logger.warning(f"⚠️ Error al cargar configuración '{key}' de la BD: {err}")
+    return None
+
+
+def save_guild_queue(guild_id: int, song_queue: list) -> None:
+    """Serializa y persiste la cola de canciones de un servidor para sobrevivir reinicios."""
+    import json
+    try:
+        serializable = []
+        for song in song_queue:
+            if isinstance(song, dict) and song.get("title"):
+                serializable.append({
+                    "title": song.get("title"),
+                    "url": song.get("url"),
+                    "duration": song.get("duration", 0),
+                    "uploader": song.get("uploader", ""),
+                    "origin": song.get("origin", "🎵 Recuperada tras reinicio"),
+                    "user_id": song.get("user_id"),
+                    "username": song.get("username"),
+                    "guild_id": str(guild_id),
+                    "id": song.get("id"),
+                })
+        save_config(f"queue_{guild_id}", json.dumps(serializable))
+    except Exception as err:
+        logger.warning(f"⚠️ Error al guardar cola persistente para servidor {guild_id}: {err}")
+
+
+def load_guild_queue(guild_id: int) -> list:
+    """Recupera y limpia la cola de canciones guardada de un servidor desde la BD."""
+    import json
+    try:
+        raw_json = load_config(f"queue_{guild_id}")
+        if raw_json:
+            parsed_queue = json.loads(raw_json)
+            if isinstance(parsed_queue, list) and parsed_queue:
+                save_config(f"queue_{guild_id}", json.dumps([]))
+                return parsed_queue
+    except Exception as err:
+        logger.warning(f"⚠️ Error al cargar cola persistente para servidor {guild_id}: {err}")
+    return []
+
+
+def is_guild_persist_enabled(guild_id: int) -> bool:
+    """Verifica si la persistencia de colas está habilitada para un servidor específico."""
+    stored_pref = load_config(f"persist_queue_{guild_id}")
+    if stored_pref is not None:
+        return stored_pref.lower() in ("on", "true", "1", "yes")
+    return os.getenv("PERSIST_QUEUES", "true").lower() in ("true", "1", "yes")
+
+
+def set_guild_persist_enabled(guild_id: int, enabled: bool) -> None:
+    """Guarda la preferencia de persistencia de colas por servidor."""
+    save_config(f"persist_queue_{guild_id}", "on" if enabled else "off")

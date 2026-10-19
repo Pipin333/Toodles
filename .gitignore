@@ -1,10 +1,13 @@
 # Secretos y Autenticación
 cookies.txt
-*.txt
+tooodles_cookies.txt
 .env
+.env.local
 
 # Bases de Datos Locales
 *.db
+*.db-shm
+*.db-wal
 tooodles.db
 
 # Cache y Archivos Temporales de Python
@@ -12,10 +15,13 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.pytest_cache/
 /tmp/cache_*
 
-# Docker e IDEs
-.dockerignore
+# Archivos Legados Locales
+old/
+
+# IDEs
 .vscode/
 .idea/
 
@@ -24,3 +30,10 @@ data/
 
 # Logs
 logs/
+
+# Graphify generated knowledge graph artifacts (Balthasar guard)
+graphify-out/
+.graphify/
+graph.html
+graph.json
+GRAPH_REPORT.md

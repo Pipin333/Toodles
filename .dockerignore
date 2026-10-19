@@ -1,0 +1,44 @@
+# Dependencias y entornos virtuales locales
+node_modules/
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Control de versiones e IDEs
+.git/
+.github/
+.vscode/
+.idea/
+.agents/
+.gemini/
+
+# Secretos y variables locales
+.env
+.env.local
+cookies.txt
+tooodles_cookies.txt
+
+# Bases de datos, artefactos y logs del host
+*.db
+*.db-shm
+*.db-wal
+data/
+logs/
+dist/
+build/
+
+# Código legado, tests y grafos de análisis
+old/
+tests/
+graphify-out/
+.graphify/
+graph.html
+graph.json
+GRAPH_REPORT.md
+.DS_Store
+Thumbs.db

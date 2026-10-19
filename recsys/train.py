@@ -391,25 +391,25 @@ def export_artifacts(user_factors, item_factors, item2vec_vectors, audio_feature
                 neg_songs.append(s)
     
     save_dict = {
-        'user_id_map_keys': np.array(list(user_id_map.keys()), dtype=object),
+        'user_id_map_keys': np.array([str(k) for k in user_id_map.keys()], dtype=np.str_),
         'user_id_map_values': np.array(list(user_id_map.values()), dtype=np.int32),
         'song_id_map_keys': np.array(list(song_id_map.keys()), dtype=np.int32),
         'song_id_map_values': np.array(list(song_id_map.values()), dtype=np.int32),
         'reverse_song_map_keys': np.array(list(reverse_song_map.keys()), dtype=np.int32),
         'reverse_song_map_values': np.array(list(reverse_song_map.values()), dtype=np.int32),
         'reverse_user_map_keys': np.array(list(reverse_user_map.keys()), dtype=np.int32),
-        'reverse_user_map_values': np.array(list(reverse_user_map.values()), dtype=object),
+        'reverse_user_map_values': np.array([str(v) for v in reverse_user_map.values()], dtype=np.str_),
         'negative_score_users': np.array(neg_users, dtype=np.int32),
         'negative_score_songs': np.array(neg_songs, dtype=np.int32),
     }
     
-    # Guardar metadatos de canciones como arrays paralelos
+    # Guardar metadatos de canciones como arrays paralelos Unicode (sin pickle)
     song_ids_list = [s['id'] for s in songs_metadata]
-    song_titles_list = [s.get('title', '') or '' for s in songs_metadata]
-    song_artists_list = [s.get('artist', '') or '' for s in songs_metadata]
+    song_titles_list = [str(s.get('title', '') or '') for s in songs_metadata]
+    song_artists_list = [str(s.get('artist', '') or '') for s in songs_metadata]
     save_dict['meta_song_ids'] = np.array(song_ids_list, dtype=np.int32)
-    save_dict['meta_song_titles'] = np.array(song_titles_list, dtype=object)
-    save_dict['meta_song_artists'] = np.array(song_artists_list, dtype=object)
+    save_dict['meta_song_titles'] = np.array(song_titles_list, dtype=np.str_)
+    save_dict['meta_song_artists'] = np.array(song_artists_list, dtype=np.str_)
     
     if user_factors is not None:
         save_dict['user_factors'] = user_factors

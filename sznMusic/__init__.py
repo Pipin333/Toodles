@@ -13,6 +13,7 @@ from .player import (
     GuildPlayer,
     prefetch_chunk_throttled,
     cleanup_cache,
+    cleanup_guild_player_cache,
     cleanup_old_cache,
     fuzzy_find_songs,
     _clean_title_for_search,
@@ -151,42 +152,9 @@ class MusicCore(commands.Cog, MusicPlayerMixin, MusicRadioMixin):
             await ui.notify_now_playing(ctx, player.current_song)
             return
 
-        start_time = getattr(player, 'current_song_start_time', None)
-        elapsed_sec = int(time.time() - start_time) if start_time else 0
-        duration_sec = player.current_song.get('duration', 0)
-        
-        elapsed_str = self.format_duration(elapsed_sec)
-        total_str = self.format_duration(duration_sec)
-
-        if duration_sec > 0:
-            percent = min(1.0, max(0.0, elapsed_sec / duration_sec))
-            bar_len = 12
-            filled = int(bar_len * percent)
-            progress_bar = f"`{'▬' * filled}🔘{'▬' * (bar_len - filled)}`"
-            time_display = f"`{elapsed_str} / {total_str}`\n{progress_bar}"
-        else:
-            time_display = f"`{elapsed_str}` 🔴 EN VIVO"
-
-        origin = player.current_song.get('origin', '🎵 Solicitada')
-        is_radio = "radio" in origin.lower()
-        embed_color = 0x1db954 if "spotify" in origin.lower() else (0x8a2be2 if is_radio else 0x7d5fff)
-
-        embed = discord.Embed(
-            title="🎶 Ahora Reproduciendo" if not is_radio else "📻 Radio Automática",
-            description=f"**[{player.current_song.get('title', 'Desconocido')}]({player.current_song.get('url', 'https://www.youtube.com')})**",
-            color=embed_color
-        )
-        embed.add_field(name="👤 Artista", value=f"`{player.current_song.get('uploader', 'Artista')}`", inline=True)
-        embed.add_field(name="⏱️ Progreso", value=time_display, inline=True)
-        embed.add_field(name="🧬 Origen", value=f"`{origin}`", inline=False)
-        
-        if player.current_song.get('thumbnail') and player.current_song['thumbnail'].startswith("http"):
-            embed.set_thumbnail(url=player.current_song['thumbnail'])
-
+        from sznUI.embeds import EmbedFactory
         vc_name = ctx.author.voice.channel.name if ctx.author and ctx.author.voice else "Canal de voz"
-        vibe_size = len(getattr(player, 'recent_artist_ids', []))
-        embed.set_footer(text=f"🔊 VC: {vc_name}  •  🧬 Perfil Radio: {vibe_size}/5 artistas")
-
+        embed = EmbedFactory.build_now_playing_embed(player.current_song, player, vc_name=vc_name)
         await ctx.send(embed=embed)
 
     @commands.command()
@@ -225,10 +193,10 @@ class MusicCore(commands.Cog, MusicPlayerMixin, MusicRadioMixin):
             if full_queue:
                 save_guild_queue(ctx.guild.id, full_queue)
 
+        cleanup_guild_player_cache(player)
         player.song_queue.clear()
         player.radio_mode = False
         player.current_song = None
-        cleanup_cache()
         if player.voice_client:
             player.voice_client.stop()
             await player.voice_client.disconnect()
@@ -338,11 +306,11 @@ class MusicCore(commands.Cog, MusicPlayerMixin, MusicRadioMixin):
             vc = player.voice_client
             if vc and not vc.is_playing() and not getattr(vc, 'is_paused', lambda: False)() and not player.song_queue:
                 ctx_to_notify = player.last_ctx
+                cleanup_guild_player_cache(player)
                 player.voice_client = None
                 player.current_song = None
                 player.radio_mode = False
                 player.last_ctx = None
-                cleanup_cache()
                 try:
                     await vc.disconnect()
                 except Exception:
@@ -376,12 +344,12 @@ class MusicCore(commands.Cog, MusicPlayerMixin, MusicRadioMixin):
                         if full_queue:
                             save_guild_queue(member.guild.id, full_queue)
 
+                    cleanup_guild_player_cache(player)
                     player.song_queue.clear()
                     player.radio_mode = False
                     player.voice_client = None
                     player.current_song = None
                     player.last_ctx = None
-                    cleanup_cache()
                     
                     if ctx_to_notify:
                         try:
@@ -408,11 +376,11 @@ class MusicCore(commands.Cog, MusicPlayerMixin, MusicRadioMixin):
                                     save_guild_queue(member.guild.id, full_queue)
 
                             ctx_to_notify = player.last_ctx
+                            cleanup_guild_player_cache(player)
                             player.song_queue.clear()
                             player.radio_mode = False
                             player.current_song = None
                             player.last_ctx = None
-                            cleanup_cache()
                             try:
                                 if player.voice_client:
                                     player.voice_client.stop()
@@ -588,14 +556,9 @@ class MusicCore(commands.Cog, MusicPlayerMixin, MusicRadioMixin):
             self.recsys_engine.load(force=True)
 
             stats = self.recsys_engine.stats
-            await msg.edit(content=(
-                f"✅ **Precarga completada exitosamente para @{target_username}**!\n"
-                f"📊 **Resultados**:\n"
-                f"• Canciones procesadas: **{result['total']}**\n"
-                f"• Nuevas en BBDD: **{result['new_songs']}**\n"
-                f"• Likes añadidos a @{target_username}: **{result['likes_added']}**\n"
-                f"🚀 **Motor ML actualizado**: {stats['n_songs']} canciones y {stats['n_users']} usuarios listos para Autoplay."
-            ))
+            from sznUI.embeds import EmbedFactory
+            summary_embed = EmbedFactory.build_preload_result_embed(target_username, result, stats)
+            await msg.edit(content=None, embed=summary_embed)
 
         except Exception as e:
             logger.error(f"❌ Error en preload: {e}")
